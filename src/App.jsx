@@ -1736,6 +1736,16 @@ export default function App() {
   const [data, setData] = useState({});
   const [verses, setVerses] = useState([]);
   const [labels, setLabels] = useState(DEFAULT_LABELS);
+  // Kept in sync with the latest state on every render, so in-flight async work (like the
+  // cloud merge below) can read the current values after an await instead of a stale snapshot
+  // from before a network round-trip - otherwise a change made while a fetch is in flight can
+  // get silently overwritten once that fetch resolves.
+  const dataRef = useRef(data);
+  const versesRef = useRef(verses);
+  const labelsRef = useRef(labels);
+  useEffect(() => { dataRef.current = data; });
+  useEffect(() => { versesRef.current = verses; });
+  useEffect(() => { labelsRef.current = labels; });
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("today");
   const [vizTab, setVizTab] = useState("jdur");
@@ -1808,8 +1818,10 @@ export default function App() {
     (async () => {
       try {
         setSync("loading");
-        const localPayload = { days: data, verses, labels };
         const cloudPayload = await fetchCloudState(user.id);
+        // Read local state fresh here (after the network round-trip), not from before it -
+        // otherwise an edit made while this fetch was in flight would get overwritten below.
+        const localPayload = { days: dataRef.current, verses: versesRef.current, labels: labelsRef.current };
         const merged = cloudPayload ? mergePayloads(cloudPayload, localPayload) : normalisePayload(localPayload);
         merged.labels = withScannedLabels(merged.labels, merged.days, merged.verses);
         if (cloudPayload || payloadHasContent(localPayload)) {
@@ -2119,7 +2131,7 @@ export default function App() {
     try {
       setSync("loading");
       const cloudPayload = await fetchCloudState(user.id);
-      const merged = mergePayloads(cloudPayload || {}, { days: data, verses, labels });
+      const merged = mergePayloads(cloudPayload || {}, { days: dataRef.current, verses: versesRef.current, labels: labelsRef.current });
       setData(merged.days);
       setVerses(merged.verses);
       setLabels(merged.labels);
