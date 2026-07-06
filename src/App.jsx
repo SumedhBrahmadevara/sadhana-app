@@ -1636,12 +1636,19 @@ const dedupOrdered = (...lists) => {
   lists.flat().forEach((v) => { if (v && !seen.has(v)) { seen.add(v); out.push(v); } });
   return out;
 };
-const normaliseLabels = (labels) => ({
-  speakers: dedupOrdered(DEFAULT_LABELS.speakers, Array.isArray(labels?.speakers) ? labels.speakers : []),
-  books: dedupOrdered(DEFAULT_LABELS.books, Array.isArray(labels?.books) ? labels.books : []),
-  prayers: dedupOrdered(Array.isArray(labels?.prayers) ? labels.prayers : []),
-  deities: dedupOrdered(Array.isArray(labels?.deities) ? labels.deities : []),
-});
+// Seeds sensible starting labels only when there's no labels object at all yet (brand-new user).
+// Once labels exist, even as empty arrays, we respect exactly what's there — including deletions.
+const normaliseLabels = (labels) => {
+  if (!labels || typeof labels !== "object") {
+    return { speakers: [...DEFAULT_LABELS.speakers], books: [...DEFAULT_LABELS.books], prayers: [], deities: [] };
+  }
+  return {
+    speakers: dedupOrdered(Array.isArray(labels.speakers) ? labels.speakers : []),
+    books: dedupOrdered(Array.isArray(labels.books) ? labels.books : []),
+    prayers: dedupOrdered(Array.isArray(labels.prayers) ? labels.prayers : []),
+    deities: dedupOrdered(Array.isArray(labels.deities) ? labels.deities : []),
+  };
+};
 const normalisePayload = (payload) => ({
   days: payload?.days && typeof payload.days === "object" ? payload.days : {},
   verses: Array.isArray(payload?.verses) ? payload.verses : [],
@@ -1810,6 +1817,9 @@ export default function App() {
     const v = (value || "").trim();
     if (!v || (labels[kind] || []).includes(v)) return;
     persist(data, verses, { ...labels, [kind]: [...(labels[kind] || []), v] });
+  };
+  const removeLabel = (kind, value) => {
+    persist(data, verses, { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== value) });
   };
   const setAwakeCount = (raw) => {
     const n = Math.max(0, Math.min(12, Number(raw) || 0));
@@ -2319,7 +2329,7 @@ export default function App() {
         </header>
 
         <nav style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-          {[["today", "Today"], ["japa", "Japa"], ["trends", "Trends"], ["week", "Review"], ["account", "Account"], ["export", "Export"], ["viz", "Visuals"], ["about", "About"], ...(isOwner ? [["admin", "Admin"]] : [])].map(([k, l]) => (
+          {[["today", "Today"], ["japa", "Japa"], ["trends", "Trends"], ["week", "Review"], ["account", "Account"], ["export", "Export"], ["viz", "Visuals"], ["settings", "Settings"], ["about", "About"], ...(isOwner ? [["admin", "Admin"]] : [])].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               padding: "8px 14px", borderRadius: 999, fontSize: 13, cursor: "pointer", fontWeight: 600,
               border: `1.5px solid ${tab === k ? C.maroon : C.line}`,
@@ -2758,6 +2768,32 @@ export default function App() {
               )}
               {authMsg && <div style={{ fontSize: 12, color: C.faint, marginTop: 10 }}>{authMsg}</div>}
             </section>
+          </div>
+        )}
+
+        {/* ===== SETTINGS ===== */}
+        {tab === "settings" && (
+          <div style={{ display: "grid", gap: 14 }}>
+            <section style={cardS}>
+              <h2 style={h2S}>Manage labels</h2>
+              <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>
+                Remove labels you don't use anymore. This only affects the picker lists — days you've already logged keep their recorded values.
+              </p>
+            </section>
+            {[["speakers", "Speakers"], ["books", "Books"], ["prayers", "Prayers"], ["deities", "Deities"]].map(([kind, title]) => (
+              <section key={kind} style={cardS}>
+                <h2 style={h2S}>{title}</h2>
+                {(labels[kind] || []).length === 0 && <Empty m={`No ${title.toLowerCase()} added yet.`} />}
+                <div style={{ display: "grid", gap: 6 }}>
+                  {(labels[kind] || []).map((v) => (
+                    <div key={v} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
+                      <span>{v}</span>
+                      <button onClick={() => removeLabel(kind, v)} style={{ border: "none", background: "none", color: C.maroon, cursor: "pointer", fontSize: 13 }}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
         )}
 
