@@ -1649,6 +1649,23 @@ const normaliseLabels = (labels) => {
     deities: dedupOrdered(Array.isArray(labels.deities) ? labels.deities : []),
   };
 };
+// Finds distinct speaker/book/prayer/deity strings already used in logged days or verses
+// that aren't yet in the labels lists — e.g. from an old JSON file logged before labels existed.
+// Purely additive: never removes or merges anything, just surfaces what's already there.
+const scanLabelsFromData = (days, verses) => {
+  const speakers = new Set(), books = new Set(), prayers = new Set(), deities = new Set();
+  Object.values(days || {}).forEach((d) => {
+    (d?.hearing || []).forEach((h) => h?.speaker && speakers.add(h.speaker));
+    (d?.reading || []).forEach((r) => r?.book && books.add(r.book));
+    (d?.prayers || []).forEach((p) => p?.label && prayers.add(p.label));
+    (d?.deityDressing || []).forEach((dd) => dd?.label && deities.add(dd.label));
+  });
+  (verses || []).forEach((v) => {
+    if (v?.book) books.add(v.book);
+    else { const m = /^([A-Za-z-]+)/.exec(v?.ref || ""); if (m) books.add(m[1]); }
+  });
+  return { speakers: [...speakers], books: [...books], prayers: [...prayers], deities: [...deities] };
+};
 const normalisePayload = (payload) => ({
   days: payload?.days && typeof payload.days === "object" ? payload.days : {},
   verses: Array.isArray(payload?.verses) ? payload.verses : [],
@@ -1820,6 +1837,32 @@ export default function App() {
   };
   const removeLabel = (kind, value) => {
     persist(data, verses, { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== value) });
+  };
+  const rescanLabels = () => {
+    const found = scanLabelsFromData(data, verses);
+    persist(data, verses, {
+      speakers: dedupOrdered(labels.speakers, found.speakers),
+      books: dedupOrdered(labels.books, found.books),
+      prayers: dedupOrdered(labels.prayers, found.prayers),
+      deities: dedupOrdered(labels.deities, found.deities),
+    });
+  };
+  const LABEL_FIELD = {
+    speakers: { arr: "hearing", field: "speaker" },
+    books: { arr: "reading", field: "book" },
+    prayers: { arr: "prayers", field: "label" },
+    deities: { arr: "deityDressing", field: "label" },
+  };
+  const mergeLabelInto = (kind, oldValue, newValue) => {
+    if (!newValue || oldValue === newValue) return;
+    const { arr, field } = LABEL_FIELD[kind];
+    const nextDays = Object.fromEntries(Object.entries(data).map(([k, d]) => [k, {
+      ...d,
+      [arr]: (d[arr] || []).map((item) => item[field] === oldValue ? { ...item, [field]: newValue } : item),
+    }]));
+    const nextVerses = kind === "books" ? verses.map((v) => v.book === oldValue ? { ...v, book: newValue } : v) : verses;
+    const nextLabels = { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== oldValue) };
+    persist(nextDays, nextVerses, nextLabels);
   };
   const setAwakeCount = (raw) => {
     const n = Math.max(0, Math.min(12, Number(raw) || 0));
@@ -2086,7 +2129,14 @@ export default function App() {
       const parsed = normalisePayload(JSON.parse(text));
       if (!payloadHasContent(parsed)) { setBackupMsg("That file has no sadhana data in it."); return; }
       const next = mode === "replace" ? parsed : mergePayloads(parsed, { days: data, verses, labels });
-      await persist(next.days, next.verses, next.labels);
+      const found = scanLabelsFromData(next.days, next.verses);
+      const nextLabels = {
+        speakers: dedupOrdered(next.labels.speakers, found.speakers),
+        books: dedupOrdered(next.labels.books, found.books),
+        prayers: dedupOrdered(next.labels.prayers, found.prayers),
+        deities: dedupOrdered(next.labels.deities, found.deities),
+      };
+      await persist(next.days, next.verses, nextLabels);
       setBackupMsg(mode === "replace" ? "Replaced current data with the backup file." : "Merged the backup file into your current data.");
     } catch (e) {
       setBackupMsg(e.message ? `Could not read that backup file: ${e.message}` : "Could not read that backup file.");
@@ -2777,7 +2827,12 @@ export default function App() {
             <section style={cardS}>
               <h2 style={h2S}>Manage labels</h2>
               <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>
-                Remove labels you don't use anymore. This only affects the picker lists — days you've already logged keep their recorded values.
+                Remove labels you don't use anymore — this only affects the picker lists, your already-logged days keep their recorded values.
+                Use "Merge into" to consolidate variant spellings (e.g. "SP" and "Srila Prabhupada") — this rewrites every matching day so it's counted as one.
+              </p>
+              <button style={btnS} onClick={rescanLabels}>Rescan logged data for labels</button>
+              <p style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+                Picks up any speaker, book, prayer, or deity name already used in your days or verses that isn't in these lists yet — useful right after loading an old backup.
               </p>
             </section>
             {[["speakers", "Speakers"], ["books", "Books"], ["prayers", "Prayers"], ["deities", "Deities"]].map(([kind, title]) => (
@@ -2786,9 +2841,20 @@ export default function App() {
                 {(labels[kind] || []).length === 0 && <Empty m={`No ${title.toLowerCase()} added yet.`} />}
                 <div style={{ display: "grid", gap: 6 }}>
                   {(labels[kind] || []).map((v) => (
-                    <div key={v} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
-                      <span>{v}</span>
-                      <button onClick={() => removeLabel(kind, v)} style={{ border: "none", background: "none", color: C.maroon, cursor: "pointer", fontSize: 13 }}>Remove</button>
+                    <div key={v} style={{ display: "grid", gap: 6, padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14 }}>
+                        <span>{v}</span>
+                        <button onClick={() => removeLabel(kind, v)} style={{ border: "none", background: "none", color: C.maroon, cursor: "pointer", fontSize: 13 }}>Remove</button>
+                      </div>
+                      {(labels[kind] || []).length > 1 && (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <span style={{ fontSize: 12, color: C.faint }}>Merge into</span>
+                          <select defaultValue="" onChange={(e) => { if (e.target.value) { mergeLabelInto(kind, v, e.target.value); e.target.value = ""; } }} style={{ ...inpS, fontSize: 12, padding: "4px 8px" }}>
+                            <option value="">choose…</option>
+                            {(labels[kind] || []).filter((o) => o !== v).map((o) => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
