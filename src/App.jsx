@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import * as XLSX from "xlsx";
 import {
@@ -15,6 +15,17 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
+const OWNER_EMAIL = (import.meta.env.VITE_OWNER_EMAIL || "").toLowerCase();
+const callAdminFn = async (accessToken, action, payload = {}) => {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/admin`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "Admin request failed");
+  return body;
+};
 
 // ============ constants ============
 const C = {
@@ -40,9 +51,17 @@ const SUNRISE = [8.0, 7.5, 6.6, 6.4, 5.5, 4.8, 4.9, 5.7, 6.5, 7.3, 7.2, 7.9];
 const todayKey = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const emptyDay = () => ({
-  rounds: [], activeStart: null, hearing: [], reading: [], worship: {},
-  versesRevised: false, versesRecited: false, prayers: false, wakeTime: "", sleepTime: "", awakePeriods: [], note: "",
+  rounds: [], activeStart: null, hearing: [], reading: [], worship: {}, deityDressing: [],
+  versesRevised: false, versesRecited: false, prayers: [], wakeTime: "", sleepTime: "", awakePeriods: [], note: "", journaled: false, journal: "",
 });
+const tsForTime = (timeStr) => {
+  if (!timeStr) return new Date().toISOString();
+  const [h, m] = timeStr.split(":").map(Number);
+  const d = new Date();
+  if (isNaN(h)) return d.toISOString();
+  d.setHours(h, m || 0, 0, 0);
+  return d.toISOString();
+};
 const mins = (r) => r.start && r.end ? Math.round((new Date(r.end) - new Date(r.start)) / 60000 * 10) / 10 : null;
 const fmtT = (iso) => iso ? new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "—";
 const fmtDate = (k) => {
@@ -51,6 +70,10 @@ const fmtDate = (k) => {
 };
 const hearingMin = (d) => (d?.hearing || []).reduce((a, h) => a + (+h.minutes || 0), 0);
 const readingMin = (d) => (d?.reading || []).reduce((a, r) => a + (+r.minutes || 0), 0);
+const readingPages = (d) => (d?.reading || []).reduce((a, r) => a + (+r.pages || 0), 0);
+const prayerRows = (d) => Array.isArray(d?.prayers) ? d.prayers : [];
+const prayersDone = (d) => Array.isArray(d?.prayers) ? d.prayers.length > 0 : !!d?.prayers;
+const dressingRows = (d) => Array.isArray(d?.deityDressing) ? d.deityDressing : [];
 const awakeRows = (d) => Array.isArray(d?.awakePeriods) ? d.awakePeriods : [];
 const awakeCount = (d) => awakeRows(d).filter((p) => p?.time || p?.minutes).length;
 const awakeMin = (d) => awakeRows(d).reduce((a, p) => a + (+p?.minutes || 0), 0);
@@ -70,7 +93,7 @@ const dayScore = (d) => {
   s += Math.min(readingMin(d) / 30, 1) * 20;
   s += worshipPct(d) * 15;
   s += (d.versesRevised || d.versesRecited) ? 5 : 0;
-  s += d.prayers ? 5 : 0;
+  s += prayersDone(d) ? 5 : 0;
   return Math.round(s);
 };
 const mean = (a) => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
@@ -107,6 +130,99 @@ function Toggle({ label, value, onChange }) {
       <span>{label}</span>
       <span style={{ width: 20, height: 20, borderRadius: "50%", background: value ? C.tulsi : C.line, color: "#fff", fontSize: 13, lineHeight: "20px", textAlign: "center" }}>{value ? "✓" : ""}</span>
     </button>
+  );
+}
+
+function LabelField({ value, onChange, options, onAddLabel, placeholder, style }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  if (adding) {
+    return (
+      <div style={{ display: "flex", gap: 6, ...style }}>
+        <input autoFocus placeholder={`New ${placeholder.toLowerCase()}`} value={draft}
+          onChange={(e) => setDraft(e.target.value)} style={{ ...inpS, flex: 1 }}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); if (draft.trim()) { onAddLabel(draft.trim()); onChange(draft.trim()); } setDraft(""); setAdding(false); } }} />
+        <button style={btnS} onClick={() => { if (draft.trim()) { onAddLabel(draft.trim()); onChange(draft.trim()); } setDraft(""); setAdding(false); }}>Add</button>
+        <button style={btnS} onClick={() => { setAdding(false); setDraft(""); }}>×</button>
+      </div>
+    );
+  }
+  return (
+    <select value={value} onChange={(e) => { if (e.target.value === "__add__") setAdding(true); else onChange(e.target.value); }} style={{ ...inpS, ...style }}>
+      <option value="" disabled>{placeholder}</option>
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      <option value="__add__">+ Add {placeholder.toLowerCase()}…</option>
+    </select>
+  );
+}
+
+function DaySummary({ e }) {
+  if (!e) return <Empty m="No entry logged for this day." />;
+  const row = { display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 0", borderBottom: `1px solid ${C.line}` };
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Stat v={e.rounds?.length || 0} l="rounds" />
+        <Stat v={`${hearingMin(e)}m`} l="hearing" />
+        <Stat v={`${readingMin(e)}m${readingPages(e) ? ` · ${readingPages(e)}p` : ""}`} l="reading" />
+        <Stat v={dayScore(e)} l="day score" />
+      </div>
+      {e.rounds?.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Rounds</div>
+          {e.rounds.map((r, i) => <div key={i} style={row}><span>#{i + 1}</span><span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)} · {mins(r)} min</span></div>)}
+        </div>
+      )}
+      {(e.hearing || []).length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Hearing</div>
+          {e.hearing.map((h, i) => <div key={i} style={row}><span>{h.speaker}</span><span style={{ color: C.faint }}>{h.minutes} min{h.ts ? ` · ${fmtT(h.ts)}` : ""}</span></div>)}
+        </div>
+      )}
+      {(e.reading || []).length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Reading</div>
+          {e.reading.map((r, i) => <div key={i} style={row}><span>{r.book}{r.section ? ` · ${r.section}` : ""}</span><span style={{ color: C.faint }}>{r.minutes} min{r.pages ? ` · ${r.pages}p` : ""}</span></div>)}
+        </div>
+      )}
+      {prayerRows(e).length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Prayers</div>
+          {prayerRows(e).map((p, i) => <div key={i} style={row}><span>{p.label}</span><span style={{ color: C.faint }}>{p.ts ? fmtT(p.ts) : ""}</span></div>)}
+        </div>
+      )}
+      {dressingRows(e).length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Deity dressing</div>
+          {dressingRows(e).map((d, i) => <div key={i} style={row}><span>{d.label}</span><span style={{ color: C.faint }}>{d.ts ? fmtT(d.ts) : ""}</span></div>)}
+        </div>
+      )}
+      {WORSHIP_ITEMS.some(([k]) => e.worship?.[k]) && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Worship</div>
+          <div style={{ fontSize: 13 }}>{WORSHIP_ITEMS.filter(([k]) => e.worship?.[k]).map(([, l]) => l).join(" · ")}</div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, color: C.faint }}>
+        {e.wakeTime && <span>Woke {e.wakeTime}</span>}
+        {e.sleepTime && <span>Slept {e.sleepTime}</span>}
+        {awakeMin(e) > 0 && <span>Awake {awakeCount(e)}×/{awakeMin(e)}m</span>}
+        {(e.versesRecited || e.versesRevised) && <span>Verses practised</span>}
+        {e.journaled && <span>Journaled</span>}
+      </div>
+      {e.journaled && e.journal && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Journal</div>
+          <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{e.journal}</div>
+        </div>
+      )}
+      {e.note && (
+        <div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 4 }}>Note</div>
+          <div style={{ fontSize: 13 }}>{e.note}</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -975,7 +1091,7 @@ function VersesViz({ A, verses }) {
   const cumMem = memDates.map((d) => ({ label: d.slice(5), n: ++cum }));
   // 66 source split
   const src = {};
-  verses.forEach((v) => { const m = /^([A-Za-z]+)/.exec(v.ref || ""); const s = m ? m[1].toUpperCase() : "?"; src[s] = (src[s] || 0) + 1; });
+  verses.forEach((v) => { const m = /^([A-Za-z]+)/.exec(v.ref || ""); const s = v.book || (m ? m[1].toUpperCase() : "?"); src[s] = (src[s] || 0) + 1; });
   // 67 sparklines from history
   // 69 revised vs avg round dur
   const rv = dayList.filter((d) => d.avgDur != null).map((d) => ({ x: versePracticed(d.e) ? 1 : 0, dur: d.avgDur }));
@@ -1021,12 +1137,15 @@ function VersesViz({ A, verses }) {
         )) : <Empty m="Revise or recite verses on the Today tab and the history fills in." />}
       </Viz>
       <Viz n={68} t="Prayer calendar" note="Days prayers were recited.">
-        <BinaryCalendar A={A} test={(d) => !!d.e.prayers} />
+        <BinaryCalendar A={A} test={(d) => prayersDone(d.e)} />
       </Viz>
-      <Viz n={69} t="Do verses sharpen japa?" note="Average round length on verse-practice days vs non-practice days.">
+      <Viz n={69} t="Journaling calendar" note="Days you journaled.">
+        <BinaryCalendar A={A} test={(d) => !!d.e.journaled} />
+      </Viz>
+      <Viz n={70} t="Do verses sharpen japa?" note="Average round length on verse-practice days vs non-practice days.">
         {revD.length && noRevD.length ? <BarsViz data={[{ d: "Practised", v: +mean(revD).toFixed(1) }, { d: "Didn't", v: +mean(noRevD).toFixed(1) }]} x="d" bars={[{ k: "v", name: "Avg min/round", c: C.sky }]} /> : <Empty />}
       </Viz>
-      <Viz n={70} t="The śloka tree" note="One leaf per memorised verse; buds are still learning.">
+      <Viz n={71} t="The śloka tree" note="One leaf per memorised verse; buds are still learning.">
         <SlokaTree verses={verses} />
       </Viz>
     </div>
@@ -1175,7 +1294,7 @@ function CompositeViz({ A, verses }) {
   const limbs = dayList.map((d) => ({
     ...d,
     cP: Math.min(d.n / TARGET, 1), hP: Math.min(d.hm / 30, 1), rP: Math.min(d.rm / 30, 1), wP: d.wp,
-    vP: versePracticed(d.e) ? 1 : 0, pP: d.e.prayers ? 1 : 0,
+    vP: versePracticed(d.e) ? 1 : 0, pP: prayersDone(d.e) ? 1 : 0,
   }));
   const LIMB = [["cP", "Chanting"], ["hP", "Hearing"], ["rP", "Reading"], ["wP", "Worship"], ["vP", "Verses"], ["pP", "Prayers"]];
   // 81 stacked minutes
@@ -1199,7 +1318,7 @@ function CompositeViz({ A, verses }) {
   const parts = t ? [
     ["Chanting", Math.min(t.n / TARGET, 1) * 40], ["Hearing", Math.min(t.hm / 30, 1) * 15],
     ["Reading", Math.min(t.rm / 30, 1) * 20], ["Worship", t.wp * 15],
-    ["Verses", versePracticed(t.e) ? 5 : 0], ["Prayers", t.e.prayers ? 5 : 0],
+    ["Verses", versePracticed(t.e) ? 5 : 0], ["Prayers", prayersDone(t.e) ? 5 : 0],
   ] : [];
   let acc = 0;
   const wf = parts.map(([n, v]) => { const p = acc; acc += v; return { n, pad: +p.toFixed(0), v: +v.toFixed(1) }; });
@@ -1511,9 +1630,22 @@ const setStoredPayload = async (key, value) => {
   throw new Error("No browser storage available");
 };
 
+const DEFAULT_LABELS = { speakers: ["Srila Prabhupada"], books: [...BOOKS], prayers: [], deities: [] };
+const dedupOrdered = (...lists) => {
+  const seen = new Set(); const out = [];
+  lists.flat().forEach((v) => { if (v && !seen.has(v)) { seen.add(v); out.push(v); } });
+  return out;
+};
+const normaliseLabels = (labels) => ({
+  speakers: dedupOrdered(DEFAULT_LABELS.speakers, Array.isArray(labels?.speakers) ? labels.speakers : []),
+  books: dedupOrdered(DEFAULT_LABELS.books, Array.isArray(labels?.books) ? labels.books : []),
+  prayers: dedupOrdered(Array.isArray(labels?.prayers) ? labels.prayers : []),
+  deities: dedupOrdered(Array.isArray(labels?.deities) ? labels.deities : []),
+});
 const normalisePayload = (payload) => ({
   days: payload?.days && typeof payload.days === "object" ? payload.days : {},
   verses: Array.isArray(payload?.verses) ? payload.verses : [],
+  labels: normaliseLabels(payload?.labels),
 });
 const mergeUnique = (...lists) => [...new Set(lists.flat().filter(Boolean))].sort();
 const verseKey = (v, i) => (v?.ref || v?.text || v?.id || `verse-${i}`).trim().toLowerCase();
@@ -1532,7 +1664,13 @@ const mergePayloads = (cloudPayload, localPayload) => {
       recitationHistory: mergeUnique(prev.recitationHistory || [], v.recitationHistory || []),
     });
   });
-  return { days, verses: [...verseMap.values()] };
+  const labels = {
+    speakers: dedupOrdered(cloud.labels.speakers, local.labels.speakers),
+    books: dedupOrdered(cloud.labels.books, local.labels.books),
+    prayers: dedupOrdered(cloud.labels.prayers, local.labels.prayers),
+    deities: dedupOrdered(cloud.labels.deities, local.labels.deities),
+  };
+  return { days, verses: [...verseMap.values()], labels };
 };
 const payloadHasContent = (payload) => {
   const p = normalisePayload(payload);
@@ -1561,6 +1699,7 @@ const saveCloudState = async (userId, payload) => {
 export default function App() {
   const [data, setData] = useState({});
   const [verses, setVerses] = useState([]);
+  const [labels, setLabels] = useState(DEFAULT_LABELS);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("today");
   const [vizTab, setVizTab] = useState("jdur");
@@ -1572,6 +1711,19 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authMode, setAuthMode] = useState("signin");
   const [authMsg, setAuthMsg] = useState("");
+  const [showSignup, setShowSignup] = useState(false);
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupConfirm, setSignupConfirm] = useState("");
+  const [signupMsg, setSignupMsg] = useState("");
+  const [adminUsers, setAdminUsers] = useState(null);
+  const [adminMsg, setAdminMsg] = useState("");
+  const [adminSelected, setAdminSelected] = useState(null);
+  const [adminSelectedData, setAdminSelectedData] = useState(null);
+  const [adminNewPassword, setAdminNewPassword] = useState("");
+  const [backupMsg, setBackupMsg] = useState("");
+  const [importMode, setImportMode] = useState("merge");
+  const fileInputRef = useRef(null);
   const [, tick] = useState(0);
   const tk = todayKey();
   const day = data[tk] || emptyDay();
@@ -1585,11 +1737,10 @@ export default function App() {
         let raw = null;
         raw = await getStoredPayload("sadhana-v3");
         if (!raw?.value) raw = await getStoredPayload("sadhana-v2");
-        if (raw?.value) {
-          const p = JSON.parse(raw.value);
-          setData(p.days || {});
-          setVerses(p.verses || []);
-        }
+        const norm = normalisePayload(raw?.value ? JSON.parse(raw.value) : null);
+        setData(norm.days);
+        setVerses(norm.verses);
+        setLabels(norm.labels);
       } catch (e) {}
       setLoaded(true);
     })();
@@ -1616,12 +1767,13 @@ export default function App() {
     (async () => {
       try {
         setSync("loading");
-        const localPayload = { days: data, verses };
+        const localPayload = { days: data, verses, labels };
         const cloudPayload = await fetchCloudState(user.id);
         const merged = cloudPayload ? mergePayloads(cloudPayload, localPayload) : normalisePayload(localPayload);
         if (cloudPayload || payloadHasContent(localPayload)) {
           setData(merged.days);
           setVerses(merged.verses);
+          setLabels(merged.labels);
           await setStoredPayload("sadhana-v3", JSON.stringify(merged));
           await saveCloudState(user.id, merged);
         }
@@ -1640,9 +1792,9 @@ export default function App() {
     return () => clearInterval(id);
   }, [day.activeStart]);
 
-  const persist = async (days, vs = verses) => {
-    const payload = { days, verses: vs };
-    setData(days); setVerses(vs); setSave("saving");
+  const persist = async (days, vs = verses, lbls = labels) => {
+    const payload = { days, verses: vs, labels: lbls };
+    setData(days); setVerses(vs); setLabels(lbls); setSave("saving");
     try {
       await setStoredPayload("sadhana-v3", JSON.stringify(payload));
       if (user) {
@@ -1654,6 +1806,11 @@ export default function App() {
     } catch (e) { console.error(e); setSave("error"); setSync(user ? "error" : "local"); }
   };
   const update = (patch) => persist({ ...data, [tk]: { ...day, ...patch } });
+  const addLabel = (kind, value) => {
+    const v = (value || "").trim();
+    if (!v || (labels[kind] || []).includes(v)) return;
+    persist(data, verses, { ...labels, [kind]: [...(labels[kind] || []), v] });
+  };
   const setAwakeCount = (raw) => {
     const n = Math.max(0, Math.min(12, Number(raw) || 0));
     const current = awakeRows(day);
@@ -1667,19 +1824,33 @@ export default function App() {
 
   // japa
   const startRound = () => update({ activeStart: new Date().toISOString() });
-  const finishRound = () => update({ rounds: [...day.rounds, { start: day.activeStart, end: new Date().toISOString() }], activeStart: null });
+  const finishRound = () => {
+    const rounds = [...day.rounds, { start: day.activeStart, end: new Date().toISOString() }];
+    update({ rounds, activeStart: autochant ? new Date().toISOString() : null });
+  };
   const cancelRound = () => update({ activeStart: null });
   const removeRound = (i) => update({ rounds: day.rounds.filter((_, j) => j !== i) });
-  const logManualRound = (m) => {
-    const end = new Date(), start = new Date(end - m * 60000);
+  const logManualRound = (m, endTime) => {
+    const end = new Date(tsForTime(endTime)), start = new Date(end - m * 60000);
     update({ rounds: [...day.rounds, { start: start.toISOString(), end: end.toISOString() }] });
   };
 
-  const [hForm, setHForm] = useState({ speaker: "", minutes: "" });
-  const [rForm, setRForm] = useState({ book: BOOKS[0], section: "", minutes: "" });
-  const [vForm, setVForm] = useState({ ref: "", text: "" });
+  const [hForm, setHForm] = useState({ speaker: "", minutes: "", time: "" });
+  const [rForm, setRForm] = useState({ book: BOOKS[0], section: "", minutes: "", pages: "", time: "" });
+  const [pForm, setPForm] = useState({ label: "", time: "" });
+  const [dForm, setDForm] = useState({ label: "", time: "" });
+  const [vForm, setVForm] = useState({ book: BOOKS[0], ref: "", text: "" });
   const [manageVerses, setManageVerses] = useState(false);
+  const [historyDate, setHistoryDate] = useState("");
   const [manualMin, setManualMin] = useState("");
+  const [manualEnd, setManualEnd] = useState("");
+  const [autochant, setAutochant] = useState(() => {
+    try { return window.localStorage.getItem("sadhana-autochant") === "1"; } catch { return false; }
+  });
+  const toggleAutochant = (v) => {
+    setAutochant(v);
+    try { window.localStorage.setItem("sadhana-autochant", v ? "1" : "0"); } catch { /* localStorage unavailable */ }
+  };
   const [exportOptions, setExportOptions] = useState({
     dataSummary: true, dataDaily: true, dataJapa: true, dataHearing: true, dataReading: true,
     dataWorship: true, dataSleep: true, dataVerses: true, dataVersePractice: true,
@@ -1762,7 +1933,7 @@ export default function App() {
       { axis: "Reading", v: pct((e) => Math.min(e.rm / 30, 1)) },
       { axis: "Worship", v: pct((e) => e.wp) },
       { axis: "Verses", v: pct((e) => (versePracticed(e.e) ? 1 : 0)) },
-      { axis: "Prayers", v: pct((e) => (e.e.prayers ? 1 : 0)) },
+      { axis: "Prayers", v: pct((e) => (prayersDone(e.e) ? 1 : 0)) },
     ];
   }, [A]);
   const speakerStats = useMemo(() => {
@@ -1793,11 +1964,64 @@ export default function App() {
     setSync("local");
     setAuthMsg("Signed out. This device will keep using local storage.");
   };
+  const createAccount = async () => {
+    if (!supabase) { setSignupMsg("Supabase is not configured."); return; }
+    if (!signupEmail || !signupPassword) { setSignupMsg("Enter an email and password."); return; }
+    if (signupPassword !== signupConfirm) { setSignupMsg("Passwords don't match."); return; }
+    if (signupPassword.length < 6) { setSignupMsg("Password must be at least 6 characters."); return; }
+    setSignupMsg("Creating account…");
+    try {
+      const { error } = await supabase.auth.signUp({ email: signupEmail.trim(), password: signupPassword });
+      if (error) throw error;
+      setSignupMsg("Account created. If email confirmation is enabled, confirm your email, then sign in.");
+      setSignupPassword(""); setSignupConfirm("");
+    } catch (e) { setSignupMsg(e.message || "Could not create account."); }
+  };
+  const sendPasswordReset = async () => {
+    if (!supabase) { setAuthMsg("Supabase is not configured."); return; }
+    if (!authEmail) { setAuthMsg("Enter your email above first, then tap Forgot password."); return; }
+    setAuthMsg("Sending reset link…");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(authEmail.trim(), { redirectTo: window.location.href });
+      if (error) throw error;
+      setAuthMsg("If that email has an account, a reset link is on its way.");
+    } catch (e) { setAuthMsg(e.message || "Could not send reset link."); }
+  };
+  const isOwner = !!user && OWNER_EMAIL && (user.email || "").toLowerCase() === OWNER_EMAIL;
+  const loadAdminUsers = async () => {
+    if (!session?.access_token) return;
+    setAdminMsg("Loading users…");
+    try {
+      const { users } = await callAdminFn(session.access_token, "listUsers");
+      setAdminUsers(users);
+      setAdminMsg("");
+    } catch (e) { setAdminMsg(e.message || "Could not load users."); }
+  };
+  const loadAdminUserData = async (u) => {
+    setAdminSelected(u);
+    setAdminSelectedData(null);
+    setAdminNewPassword("");
+    setAdminMsg("Loading data…");
+    try {
+      const { data } = await callAdminFn(session.access_token, "getUserData", { userId: u.id });
+      setAdminSelectedData(data);
+      setAdminMsg("");
+    } catch (e) { setAdminMsg(e.message || "Could not load that user's data."); }
+  };
+  const resetAdminUserPassword = async () => {
+    if (!adminSelected || !adminNewPassword) return;
+    setAdminMsg("Setting new password…");
+    try {
+      await callAdminFn(session.access_token, "resetPassword", { userId: adminSelected.id, newPassword: adminNewPassword });
+      setAdminMsg(`Password updated for ${adminSelected.email}. Share the new password with them directly.`);
+      setAdminNewPassword("");
+    } catch (e) { setAdminMsg(e.message || "Could not reset password."); }
+  };
   const uploadLocalToCloud = async () => {
     if (!user) return;
     try {
       setSync("saving");
-      await saveCloudState(user.id, { days: data, verses });
+      await saveCloudState(user.id, { days: data, verses, labels });
       setSync("synced");
       setAuthMsg("Uploaded this device's data to Supabase.");
     } catch (e) { setSync("error"); setAuthMsg(e.message || "Cloud upload failed."); }
@@ -1810,6 +2034,7 @@ export default function App() {
       if (!cloudPayload) { setAuthMsg("No cloud data found yet."); setSync("synced"); return; }
       setData(cloudPayload.days);
       setVerses(cloudPayload.verses);
+      setLabels(cloudPayload.labels);
       await setStoredPayload("sadhana-v3", JSON.stringify(cloudPayload));
       setSync("synced");
       setAuthMsg("Downloaded cloud data to this device.");
@@ -1820,14 +2045,47 @@ export default function App() {
     try {
       setSync("loading");
       const cloudPayload = await fetchCloudState(user.id);
-      const merged = mergePayloads(cloudPayload || {}, { days: data, verses });
+      const merged = mergePayloads(cloudPayload || {}, { days: data, verses, labels });
       setData(merged.days);
       setVerses(merged.verses);
+      setLabels(merged.labels);
       await setStoredPayload("sadhana-v3", JSON.stringify(merged));
       await saveCloudState(user.id, merged);
       setSync("synced");
       setAuthMsg("Merged cloud and this device, then saved the merged version.");
     } catch (e) { setSync("error"); setAuthMsg(e.message || "Cloud merge failed."); }
+  };
+
+  const exportBackupJson = () => {
+    const payload = normalisePayload({ days: data, verses, labels });
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sadhana-backup-${todayKey()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const triggerImport = (mode) => {
+    setImportMode(mode);
+    fileInputRef.current?.click();
+  };
+  const importBackupJson = async (file, mode) => {
+    try {
+      const text = await file.text();
+      const parsed = normalisePayload(JSON.parse(text));
+      if (!payloadHasContent(parsed)) { setBackupMsg("That file has no sadhana data in it."); return; }
+      const next = mode === "replace" ? parsed : mergePayloads(parsed, { days: data, verses, labels });
+      await persist(next.days, next.verses, next.labels);
+      setBackupMsg(mode === "replace" ? "Replaced current data with the backup file." : "Merged the backup file into your current data.");
+    } catch (e) {
+      setBackupMsg(e.message ? `Could not read that backup file: ${e.message}` : "Could not read that backup file.");
+    }
+  };
+  const handleImportFile = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) importBackupJson(file, importMode);
   };
 
   const exportExcel = (period) => {
@@ -1860,8 +2118,9 @@ export default function App() {
       { Metric: "Total night-awake minutes", Value: days.reduce((a, d) => a + (d.awakeMin || 0), 0) },
       { Metric: "Verse practice days", Value: days.filter((d) => versePracticed(d.e)).length },
       { Metric: "Verse recitation days", Value: days.filter((d) => d.e.versesRecited).length },
-      { Metric: "Prayers recited days", Value: days.filter((d) => d.e.prayers).length },
+      { Metric: "Prayers recited days", Value: days.filter((d) => prayersDone(d.e)).length },
       { Metric: "Cooked for deities days", Value: days.filter((d) => d.e.worship?.cooked).length },
+      { Metric: "Journaled days", Value: days.filter((d) => d.e.journaled).length },
     ];
 
     const dailyRows = days.map((d) => ({
@@ -1880,7 +2139,7 @@ export default function App() {
       "Verses revised": yesNo(d.e.versesRevised),
       "Verses recited": yesNo(d.e.versesRecited),
       "Any verse practice": yesNo(versePracticed(d.e)),
-      "Prayers recited": yesNo(d.e.prayers),
+      "Prayers recited": yesNo(prayersDone(d.e)),
       "Sleep time": d.e.sleepTime || "",
       "Wake time": d.e.wakeTime || "",
       "Gross sleep hours": d.grossSleepH == null ? "" : round2(d.grossSleepH),
@@ -1999,7 +2258,7 @@ export default function App() {
       Reading: Math.round(Math.min(d.rm / 30, 1) * 100),
       Worship: Math.round(d.wp * 100),
       Verses: versePracticed(d.e) ? 100 : 0,
-      Prayers: d.e.prayers ? 100 : 0,
+      Prayers: prayersDone(d.e) ? 100 : 0,
       Score: d.score,
     }));
 
@@ -2060,7 +2319,7 @@ export default function App() {
         </header>
 
         <nav style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-          {[["today", "Today"], ["japa", "Japa"], ["trends", "Trends"], ["week", "Review"], ["export", "Export"], ["viz", "Visuals"]].map(([k, l]) => (
+          {[["today", "Today"], ["japa", "Japa"], ["trends", "Trends"], ["week", "Review"], ["account", "Account"], ["export", "Export"], ["viz", "Visuals"], ["about", "About"], ...(isOwner ? [["admin", "Admin"]] : [])].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               padding: "8px 14px", borderRadius: 999, fontSize: 13, cursor: "pointer", fontWeight: 600,
               border: `1.5px solid ${tab === k ? C.maroon : C.line}`,
@@ -2083,43 +2342,48 @@ export default function App() {
               <h2 style={h2S}>Hearing — {hearingMin(day)} min</h2>
               {day.hearing.map((h, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
-                  <span>{h.speaker}</span>
+                  <span>{h.speaker}{h.ts && <span style={{ color: C.faint }}> · {fmtT(h.ts)}</span>}</span>
                   <span style={{ color: C.faint }}>{h.minutes} min
                     <button onClick={() => update({ hearing: day.hearing.filter((_, j) => j !== i) })} style={{ marginLeft: 10, border: "none", background: "none", color: C.maroon, cursor: "pointer" }}>×</button>
                   </span>
                 </div>
               ))}
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                <input placeholder="Speaker (e.g. Prabhupada)" value={hForm.speaker} onChange={(e) => setHForm({ ...hForm, speaker: e.target.value })} style={{ ...inpS, flex: 2, minWidth: 140 }} />
+                <LabelField value={hForm.speaker} onChange={(v) => setHForm({ ...hForm, speaker: v })}
+                  options={labels.speakers} onAddLabel={(v) => addLabel("speakers", v)}
+                  placeholder="Speaker" style={{ flex: 2, minWidth: 140 }} />
                 <input placeholder="Min" type="number" value={hForm.minutes} onChange={(e) => setHForm({ ...hForm, minutes: e.target.value })} style={{ ...inpS, width: 70 }} />
+                <input title="Time (optional, defaults to now)" type="time" value={hForm.time} onChange={(e) => setHForm({ ...hForm, time: e.target.value })} style={{ ...inpS, width: 100 }} />
                 <button style={btnS} onClick={() => {
                   if (!hForm.speaker || !hForm.minutes) return;
-                  update({ hearing: [...day.hearing, { ...hForm, ts: new Date().toISOString() }] });
-                  setHForm({ speaker: "", minutes: "" });
+                  update({ hearing: [...day.hearing, { speaker: hForm.speaker, minutes: hForm.minutes, ts: tsForTime(hForm.time) }] });
+                  setHForm({ speaker: "", minutes: "", time: "" });
                 }}>Add</button>
               </div>
             </section>
 
             <section style={cardS}>
-              <h2 style={h2S}>Reading — {readingMin(day)} min</h2>
+              <h2 style={h2S}>Reading — {readingMin(day)} min{readingPages(day) > 0 && <span style={{ color: C.faint, fontWeight: 400 }}> · {readingPages(day)} pages</span>}</h2>
               {day.reading.map((r, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
                   <span>{r.book}{r.section && <span style={{ color: C.faint }}> · {r.section}</span>}</span>
-                  <span style={{ color: C.faint }}>{r.minutes} min
+                  <span style={{ color: C.faint }}>{r.minutes} min{r.pages ? ` · ${r.pages}p` : ""}
                     <button onClick={() => update({ reading: day.reading.filter((_, j) => j !== i) })} style={{ marginLeft: 10, border: "none", background: "none", color: C.maroon, cursor: "pointer" }}>×</button>
                   </span>
                 </div>
               ))}
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                <select value={rForm.book} onChange={(e) => setRForm({ ...rForm, book: e.target.value })} style={{ ...inpS, flex: 1, minWidth: 130 }}>
-                  {BOOKS.map((b) => <option key={b}>{b}</option>)}
-                </select>
+                <LabelField value={rForm.book} onChange={(v) => setRForm({ ...rForm, book: v })}
+                  options={labels.books} onAddLabel={(v) => addLabel("books", v)}
+                  placeholder="Book" style={{ flex: 1, minWidth: 130 }} />
                 <input placeholder="Section (e.g. SB 1.2.6)" value={rForm.section} onChange={(e) => setRForm({ ...rForm, section: e.target.value })} style={{ ...inpS, flex: 1, minWidth: 130 }} />
                 <input placeholder="Min" type="number" value={rForm.minutes} onChange={(e) => setRForm({ ...rForm, minutes: e.target.value })} style={{ ...inpS, width: 70 }} />
+                <input placeholder="Pages" type="number" value={rForm.pages} onChange={(e) => setRForm({ ...rForm, pages: e.target.value })} style={{ ...inpS, width: 70 }} />
+                <input title="Time (optional, defaults to now)" type="time" value={rForm.time} onChange={(e) => setRForm({ ...rForm, time: e.target.value })} style={{ ...inpS, width: 100 }} />
                 <button style={btnS} onClick={() => {
                   if (!rForm.minutes) return;
-                  update({ reading: [...day.reading, { ...rForm, ts: new Date().toISOString() }] });
-                  setRForm({ book: rForm.book, section: "", minutes: "" });
+                  update({ reading: [...day.reading, { book: rForm.book, section: rForm.section, minutes: rForm.minutes, pages: rForm.pages, ts: tsForTime(rForm.time) }] });
+                  setRForm({ book: rForm.book, section: "", minutes: "", pages: "", time: "" });
                 }}>Add</button>
               </div>
             </section>
@@ -2134,6 +2398,24 @@ export default function App() {
               {WORSHIP_ITEMS.slice(5).map(([k, l]) => (
                 <Toggle key={k} label={l} value={!!day.worship[k]} onChange={(v) => update({ worship: { ...day.worship, [k]: v } })} />
               ))}
+              <div style={{ fontSize: 12, color: C.faint, margin: "10px 0 2px" }}>Deity dressing (if any)</div>
+              {dressingRows(day).map((dr, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
+                  <span>{dr.label}{dr.ts && <span style={{ color: C.faint }}> · {fmtT(dr.ts)}</span>}</span>
+                  <button onClick={() => update({ deityDressing: dressingRows(day).filter((_, j) => j !== i) })} style={{ border: "none", background: "none", color: C.maroon, cursor: "pointer" }}>×</button>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                <LabelField value={dForm.label} onChange={(v) => setDForm({ ...dForm, label: v })}
+                  options={labels.deities} onAddLabel={(v) => addLabel("deities", v)}
+                  placeholder="Deity" style={{ flex: 2, minWidth: 140 }} />
+                <input title="Time (optional, defaults to now)" type="time" value={dForm.time} onChange={(e) => setDForm({ ...dForm, time: e.target.value })} style={{ ...inpS, width: 100 }} />
+                <button style={btnS} onClick={() => {
+                  if (!dForm.label) return;
+                  update({ deityDressing: [...dressingRows(day), { label: dForm.label, ts: tsForTime(dForm.time) }] });
+                  setDForm({ label: "", time: "" });
+                }}>Add</button>
+              </div>
             </section>
 
             <section style={cardS}>
@@ -2184,9 +2466,17 @@ export default function App() {
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
                 {manageVerses && (
                   <>
-                    <input placeholder="Ref (BG 2.13)" value={vForm.ref} onChange={(e) => setVForm({ ...vForm, ref: e.target.value })} style={{ ...inpS, width: 110 }} />
+                    <LabelField value={vForm.book} onChange={(v) => setVForm({ ...vForm, book: v })}
+                      options={labels.books} onAddLabel={(v) => addLabel("books", v)}
+                      placeholder="Book" style={{ width: 130 }} />
+                    <input placeholder="Ref (2.13)" value={vForm.ref} onChange={(e) => setVForm({ ...vForm, ref: e.target.value })} style={{ ...inpS, width: 90 }} />
                     <input placeholder="First words" value={vForm.text} onChange={(e) => setVForm({ ...vForm, text: e.target.value })} style={{ ...inpS, flex: 1, minWidth: 120 }} />
-                    <button style={btnS} onClick={() => { if (!vForm.ref) return; persist(data, [...verses, { ...vForm, status: "learning", lastRevised: null, lastRecited: null, addedAt: new Date().toISOString(), history: [], recitationHistory: [] }]); setVForm({ ref: "", text: "" }); }}>Add</button>
+                    <button style={btnS} onClick={() => {
+                      if (!vForm.ref) return;
+                      const fullRef = vForm.book ? `${vForm.book} ${vForm.ref}` : vForm.ref;
+                      persist(data, [...verses, { book: vForm.book, ref: fullRef, text: vForm.text, status: "learning", lastRevised: null, lastRecited: null, addedAt: new Date().toISOString(), history: [], recitationHistory: [] }]);
+                      setVForm({ book: vForm.book, ref: "", text: "" });
+                    }}>Add</button>
                   </>
                 )}
                 <button onClick={() => setManageVerses(!manageVerses)} style={{ ...btnS, marginLeft: "auto", fontSize: 12, color: C.faint }}>{manageVerses ? "Done" : "Manage"}</button>
@@ -2195,7 +2485,23 @@ export default function App() {
 
             <section style={{ ...cardS, display: "grid", gap: 8 }}>
               <h2 style={h2S}>Prayers & rest</h2>
-              <Toggle label="Prayers recited" value={day.prayers} onChange={(v) => update({ prayers: v })} />
+              {prayerRows(day).map((p, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
+                  <span>{p.label}{p.ts && <span style={{ color: C.faint }}> · {fmtT(p.ts)}</span>}</span>
+                  <button onClick={() => update({ prayers: prayerRows(day).filter((_, j) => j !== i) })} style={{ border: "none", background: "none", color: C.maroon, cursor: "pointer" }}>×</button>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <LabelField value={pForm.label} onChange={(v) => setPForm({ ...pForm, label: v })}
+                  options={labels.prayers} onAddLabel={(v) => addLabel("prayers", v)}
+                  placeholder="Prayer" style={{ flex: 2, minWidth: 140 }} />
+                <input title="Time (optional, defaults to now)" type="time" value={pForm.time} onChange={(e) => setPForm({ ...pForm, time: e.target.value })} style={{ ...inpS, width: 100 }} />
+                <button style={btnS} onClick={() => {
+                  if (!pForm.label) return;
+                  update({ prayers: [...prayerRows(day), { label: pForm.label, ts: tsForTime(pForm.time) }] });
+                  setPForm({ label: "", time: "" });
+                }}>Add</button>
+              </div>
               <div style={{ display: "flex", gap: 10, marginTop: 4, flexWrap: "wrap" }}>
                 <label style={{ fontSize: 13, color: C.faint, flex: 1, minWidth: 130 }}>Woke up
                   <input type="time" value={day.wakeTime} onChange={(e) => update({ wakeTime: e.target.value })} style={{ ...inpS, width: "100%", marginTop: 4 }} />
@@ -2227,6 +2533,13 @@ export default function App() {
                 style={{ ...inpS, width: "100%", minHeight: 56, resize: "vertical", marginTop: 4 }} />
               <div style={{ fontSize: 14 }}>Day score: <b style={{ color: C.saffron, fontSize: 18 }}>{dayScore(day)}</b>/100</div>
             </section>
+
+            <section style={{ ...cardS, display: "grid", gap: 8 }}>
+              <h2 style={h2S}>Journal</h2>
+              <Toggle label="Journaled today" value={!!day.journaled} onChange={(v) => update({ journaled: v })} />
+              <textarea value={day.journal || ""} onChange={(e) => update({ journal: e.target.value, journaled: e.target.value ? true : day.journaled })}
+                placeholder="Today's journal entry…" style={{ ...inpS, width: "100%", minHeight: 90, resize: "vertical" }} />
+            </section>
           </div>
         )}
 
@@ -2252,10 +2565,16 @@ export default function App() {
                   <div style={{ marginTop: 14, display: "flex", gap: 8, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
                     <span style={{ fontSize: 13, color: C.faint }}>or log a finished round:</span>
                     <input type="number" placeholder="min" value={manualMin} onChange={(e) => setManualMin(e.target.value)} style={{ ...inpS, width: 70 }} />
-                    <button style={btnS} onClick={() => { if (+manualMin > 0) { logManualRound(+manualMin); setManualMin(""); } }}>Log</button>
+                    <span style={{ fontSize: 13, color: C.faint }}>ending at</span>
+                    <input title="Defaults to now" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)} style={{ ...inpS, width: 100 }} />
+                    <button style={btnS} onClick={() => { if (+manualMin > 0) { logManualRound(+manualMin, manualEnd); setManualMin(""); setManualEnd(""); } }}>Log</button>
                   </div>
                 </>
               )}
+            </section>
+
+            <section style={cardS}>
+              <Toggle label="Autochant — auto-start the next round when one finishes" value={autochant} onChange={toggleAutochant} />
             </section>
 
             <section style={cardS}>
@@ -2390,14 +2709,21 @@ export default function App() {
               ))}
               {!A.dayList.slice(-7).some((d) => d.e.note) && <Empty m="No notes this week." />}
             </section>
+            <section style={cardS}>
+              <h2 style={h2S}>History — view a past day</h2>
+              <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>Read-only — to change a past entry, use Today's tab on the day itself.</p>
+              <input type="date" value={historyDate} max={tk} onChange={(e) => setHistoryDate(e.target.value)} style={{ ...inpS, marginBottom: 14 }} />
+              {historyDate && historyDate !== tk && <DaySummary e={data[historyDate]} />}
+              {historyDate === tk && <div style={{ fontSize: 13, color: C.faint }}>That's today — see the Today tab to edit it.</div>}
+            </section>
           </div>
         )}
 
-        {/* ===== EXPORT ===== */}
-        {tab === "export" && (
+        {/* ===== ACCOUNT ===== */}
+        {tab === "account" && (
           <div style={{ display: "grid", gap: 14 }}>
             <section style={cardS}>
-              <h2 style={h2S}>Cloud sync</h2>
+              <h2 style={h2S}>Account & cloud sync</h2>
               {!cloudEnabled && (
                 <div style={{ fontSize: 13, color: C.maroon, lineHeight: 1.5 }}>
                   Supabase is not connected yet. Check that <code>.env.local</code> contains <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>, then restart <code>npm.cmd run dev</code>.
@@ -2411,9 +2737,10 @@ export default function App() {
                   <input type="email" placeholder="Email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} style={inpS} />
                   <input type="password" placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} style={inpS} />
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button style={authMode === "signin" ? btnPri : btnS} onClick={() => signInOrUp("signin")}>Sign in</button>
-                    <button style={authMode === "signup" ? btnPri : btnS} onClick={() => signInOrUp("signup")}>Create account</button>
+                    <button style={btnPri} onClick={() => signInOrUp("signin")}>Sign in</button>
+                    <button style={btnS} onClick={() => { setShowSignup(true); setSignupEmail(authEmail); setSignupMsg(""); }}>Create account</button>
                   </div>
+                  <button style={{ ...btnS, width: "fit-content", fontSize: 12, color: C.faint, border: "none", background: "none", padding: 0 }} onClick={sendPasswordReset}>Forgot password?</button>
                 </div>
               )}
               {cloudEnabled && user && (
@@ -2430,6 +2757,123 @@ export default function App() {
                 </div>
               )}
               {authMsg && <div style={{ fontSize: 12, color: C.faint, marginTop: 10 }}>{authMsg}</div>}
+            </section>
+          </div>
+        )}
+
+        {/* ===== ABOUT ===== */}
+        {tab === "about" && (
+          <div style={{ display: "grid", gap: 14 }}>
+            <section style={cardS}>
+              <h2 style={h2S}>Sundar Chaitanya Das</h2>
+              <p style={{ fontSize: 13, color: C.faint, marginTop: -6 }}>formerly known as Sumedh Brahmadevara</p>
+              <div style={{ display: "grid", gap: 12, fontSize: 14, lineHeight: 1.7 }}>
+                <p style={{ margin: 0 }}>
+                  Sundar Chaitanya Das, formerly known as Sumedh Brahmadevara, was born into the Kṛṣṇa conscious movement. From a young age, he was particularly intrigued by philosophy and Sanskrit ślokas: he would sit in lectures making notes and memorised ten chapters of the Bhagavad-gītā by the age of eight.
+                </p>
+                <p style={{ margin: 0 }}>
+                  He later began serving in kīrtanas and deepened his spiritual practice through increased scriptural study of the Bhagavad-gītā, Śrī Īśopaniṣad, Bhakti-rasāmṛta-sindhu, Tattva-sandarbha and various other Gauḍīya Vaiṣṇava texts. He completed his Bhakti-śāstrī qualification at the age of fifteen.
+                </p>
+                <p style={{ margin: 0 }}>
+                  He is a qualified Bhakti-śāstrī teacher and has delivered classes and presentations on Kṛṣṇa consciousness for groups of different ages over the years. He took initiation from Radhanath Swami at the age of eighteen. He has led the Pandava Sena Manchester youth group and studied Economics at the University of Cambridge, where he also served through KCSoc.
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 18 }}>
+                <a href="https://www.instagram.com/sundarchaitanyadas/" target="_blank" rel="noopener noreferrer" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>Instagram →</a>
+                <a href="https://www.youtube.com/@sundarchaitanyadas" target="_blank" rel="noopener noreferrer" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>YouTube →</a>
+                <a href="https://substack.com/@sundarchaitanyadas" target="_blank" rel="noopener noreferrer" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>Substack →</a>
+                <a href="mailto:sundarchaitanyadas@gmail.com" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>Email →</a>
+              </div>
+            </section>
+
+            <section style={cardS}>
+              <h2 style={h2S}>The importance of sadhana</h2>
+              <div style={{ display: "grid", gap: 12, fontSize: 14, lineHeight: 1.7 }}>
+                <p style={{ margin: 0 }}>
+                  Sādhana is the daily practice that turns philosophy into realisation. Chanting, hearing, reading, worship and remembrance are not separate boxes to tick — each limb supports the others, and consistency across all of them, done a little every day, does more for the heart than intensity practised occasionally.
+                </p>
+                <p style={{ margin: 0 }}>
+                  This app exists because what gets measured gets attended to. Tracking sadhana honestly — including the days it falls short — builds the self-awareness needed to actually improve, rather than relying on vague impressions of "how it's going."
+                </p>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ===== ADMIN ===== */}
+        {tab === "admin" && isOwner && (
+          <div style={{ display: "grid", gap: 14 }}>
+            <section style={cardS}>
+              <h2 style={h2S}>All users</h2>
+              <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>
+                Requires the <code>admin</code> Supabase Edge Function to be deployed. Passwords are never stored or shown — you can set a new one for a locked-out user below.
+              </p>
+              <button style={btnPri} onClick={loadAdminUsers}>Load users</button>
+              {adminMsg && <div style={{ fontSize: 12, color: C.faint, marginTop: 10 }}>{adminMsg}</div>}
+              {adminUsers && (
+                <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
+                  {adminUsers.map((u) => (
+                    <button key={u.id} onClick={() => loadAdminUserData(u)}
+                      style={{ ...btnS, textAlign: "left", background: adminSelected?.id === u.id ? C.saffronSoft : "#fff" }}>
+                      {u.email} <span style={{ color: C.faint, fontSize: 11 }}> · last in {u.lastSignInAt ? fmtDate(u.lastSignInAt.slice(0, 10)) : "never"}</span>
+                    </button>
+                  ))}
+                  {adminUsers.length === 0 && <Empty m="No users yet." />}
+                </div>
+              )}
+            </section>
+
+            {adminSelected && (
+              <section style={cardS}>
+                <h2 style={h2S}>{adminSelected.email}</h2>
+                <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
+                  <div style={{ fontSize: 13, color: C.faint }}>
+                    {adminSelectedData ? `${Object.keys(adminSelectedData.days || {}).length} days logged, ${(adminSelectedData.verses || []).length} verses.` : "Loading…"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input type="password" placeholder="New password (min 6 chars)" value={adminNewPassword} onChange={(e) => setAdminNewPassword(e.target.value)} style={{ ...inpS, flex: 1, minWidth: 180 }} />
+                  <button style={btnS} onClick={resetAdminUserPassword}>Set new password</button>
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+
+        {showSignup && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(39,33,64,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 100 }}
+            onClick={(e) => { if (e.target === e.currentTarget) setShowSignup(false); }}>
+            <div style={{ ...cardS, width: "100%", maxWidth: 360 }}>
+              <h2 style={h2S}>Create account</h2>
+              <div style={{ display: "grid", gap: 10 }}>
+                <input type="email" placeholder="Email" value={signupEmail} onChange={(e) => setSignupEmail(e.target.value)} style={inpS} />
+                <input type="password" placeholder="Password" value={signupPassword} onChange={(e) => setSignupPassword(e.target.value)} style={inpS} />
+                <input type="password" placeholder="Confirm password" value={signupConfirm} onChange={(e) => setSignupConfirm(e.target.value)} style={inpS} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={{ ...btnPri, flex: 1 }} onClick={createAccount}>Create account</button>
+                  <button style={btnS} onClick={() => setShowSignup(false)}>Cancel</button>
+                </div>
+                {signupMsg && <div style={{ fontSize: 12, color: C.faint }}>{signupMsg}</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===== EXPORT ===== */}
+        {tab === "export" && (
+          <div style={{ display: "grid", gap: 14 }}>
+            <section style={cardS}>
+              <h2 style={h2S}>Backup & restore (JSON)</h2>
+              <p style={{ fontSize: 13, color: C.faint, marginTop: 0 }}>
+                A full, lossless backup of every day, japa round, and verse — unlike the Excel exports below, this file can be loaded straight back into the app. Use it to carry all your data into a new version of the app, or to restore after a device change.
+              </p>
+              <div style={{ display: "grid", gap: 8 }}>
+                <button style={{ ...btnPri, width: "100%" }} onClick={exportBackupJson}>Download full backup (.json) →</button>
+                <button style={{ ...btnS, width: "100%" }} onClick={() => triggerImport("merge")}>Restore backup — merge with current data</button>
+                <button style={{ ...btnS, width: "100%", color: C.maroon }} onClick={() => triggerImport("replace")}>Restore backup — replace current data</button>
+              </div>
+              <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+              {backupMsg && <div style={{ fontSize: 12, color: C.faint, marginTop: 10 }}>{backupMsg}</div>}
             </section>
 
             <section style={cardS}>
