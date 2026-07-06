@@ -1756,6 +1756,7 @@ export default function App() {
   const [adminMsg, setAdminMsg] = useState("");
   const [adminSelected, setAdminSelected] = useState(null);
   const [adminSelectedData, setAdminSelectedData] = useState(null);
+  const [adminViewDate, setAdminViewDate] = useState("");
   const [adminNewPassword, setAdminNewPassword] = useState("");
   const [backupMsg, setBackupMsg] = useState("");
   const [importMode, setImportMode] = useState("merge");
@@ -2063,10 +2064,13 @@ export default function App() {
     setAdminSelected(u);
     setAdminSelectedData(null);
     setAdminNewPassword("");
+    setAdminViewDate("");
     setAdminMsg("Loading data…");
     try {
       const { data } = await callAdminFn(session.access_token, "getUserData", { userId: u.id });
       setAdminSelectedData(data);
+      const dayKeys = Object.keys(data?.days || {}).sort();
+      setAdminViewDate(dayKeys[dayKeys.length - 1] || "");
       setAdminMsg("");
     } catch (e) { setAdminMsg(e.message || "Could not load that user's data."); }
   };
@@ -2939,6 +2943,22 @@ export default function App() {
                   <input type="password" placeholder="New password (min 6 chars)" value={adminNewPassword} onChange={(e) => setAdminNewPassword(e.target.value)} style={{ ...inpS, flex: 1, minWidth: 180 }} />
                   <button style={btnS} onClick={resetAdminUserPassword}>Set new password</button>
                 </div>
+              </section>
+            )}
+
+            {adminSelected && adminSelectedData && (
+              <section style={cardS}>
+                <h2 style={h2S}>Their day-by-day log</h2>
+                {Object.keys(adminSelectedData.days || {}).length === 0 ? (
+                  <Empty m="This user hasn't logged any days yet." />
+                ) : (
+                  <>
+                    <input type="date" value={adminViewDate} max={tk}
+                      min={Object.keys(adminSelectedData.days).sort()[0]}
+                      onChange={(e) => setAdminViewDate(e.target.value)} style={{ ...inpS, marginBottom: 14 }} />
+                    <DaySummary e={adminSelectedData.days[adminViewDate]} />
+                  </>
+                )}
               </section>
             )}
           </div>
