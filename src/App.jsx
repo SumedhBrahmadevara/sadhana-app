@@ -2647,37 +2647,6 @@ export default function App() {
               )}
             </section>
 
-            <section style={cardS}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
-                onClick={() => setJapaHistoryOpen(!japaHistoryOpen)}>
-                <h2 style={{ ...h2S, margin: 0 }}>Round history</h2>
-                <span style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>{japaHistoryOpen ? "Hide ▲" : "Show ▼"}</span>
-              </div>
-              {japaHistoryOpen && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 14 }}>
-                    <button onClick={() => shiftJapaHistoryDate(-1)} style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1 }}>‹</button>
-                    <input type="date" value={historyDate || tk} max={tk} onChange={(e) => setHistoryDate(e.target.value)}
-                      style={{ ...inpS, textAlign: "center", fontWeight: 600, minWidth: 150 }} />
-                    <button onClick={() => shiftJapaHistoryDate(1)} disabled={(historyDate || tk) === tk}
-                      style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1, opacity: (historyDate || tk) === tk ? 0.35 : 1, cursor: (historyDate || tk) === tk ? "default" : "pointer" }}>›</button>
-                  </div>
-                  {(() => {
-                    const viewDate = historyDate || tk;
-                    const viewRounds = data[viewDate]?.rounds || [];
-                    if (viewRounds.length === 0) return <Empty m={viewDate === tk ? "No rounds yet today." : "No rounds logged that day."} />;
-                    return viewRounds.map((r, i) => (
-                      <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 }}>
-                        <span><b>#{i + 1}</b> <span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)}</span></span>
-                        <b style={{ color: C.tulsi }}>{mins(r)} min</b>
-                      </div>
-                    ));
-                  })()}
-                  <p style={{ fontSize: 11, color: C.faint, marginTop: 10, marginBottom: 0 }}>Read-only — to edit today, use the timer above.</p>
-                </div>
-              )}
-            </section>
-
             <button onClick={() => toggleAutochant(!autochant)} style={{
               display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
               fontSize: 12, fontWeight: 600, cursor: "pointer", width: "fit-content",
@@ -2726,6 +2695,37 @@ export default function App() {
                     </BarChart>
                   </ResponsiveContainer>
                 </>
+              )}
+            </section>
+
+            <section style={cardS}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+                onClick={() => setJapaHistoryOpen(!japaHistoryOpen)}>
+                <h2 style={{ ...h2S, margin: 0 }}>Round history</h2>
+                <span style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>{japaHistoryOpen ? "Hide ▲" : "Show ▼"}</span>
+              </div>
+              {japaHistoryOpen && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 14 }}>
+                    <button onClick={() => shiftJapaHistoryDate(-1)} style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1 }}>‹</button>
+                    <input type="date" value={historyDate || tk} max={tk} onChange={(e) => setHistoryDate(e.target.value)}
+                      style={{ ...inpS, textAlign: "center", fontWeight: 600, minWidth: 150 }} />
+                    <button onClick={() => shiftJapaHistoryDate(1)} disabled={(historyDate || tk) === tk}
+                      style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1, opacity: (historyDate || tk) === tk ? 0.35 : 1, cursor: (historyDate || tk) === tk ? "default" : "pointer" }}>›</button>
+                  </div>
+                  {(() => {
+                    const viewDate = historyDate || tk;
+                    const viewRounds = data[viewDate]?.rounds || [];
+                    if (viewRounds.length === 0) return <Empty m={viewDate === tk ? "No rounds yet today." : "No rounds logged that day."} />;
+                    return viewRounds.map((r, i) => (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 }}>
+                        <span><b>#{i + 1}</b> <span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)}</span></span>
+                        <b style={{ color: C.tulsi }}>{mins(r)} min</b>
+                      </div>
+                    ));
+                  })()}
+                  <p style={{ fontSize: 11, color: C.faint, marginTop: 10, marginBottom: 0 }}>Read-only — to edit today, use the timer above.</p>
+                </div>
               )}
             </section>
           </div>
