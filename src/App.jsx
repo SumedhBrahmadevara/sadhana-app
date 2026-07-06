@@ -1666,6 +1666,18 @@ const scanLabelsFromData = (days, verses) => {
   });
   return { speakers: [...speakers], books: [...books], prayers: [...prayers], deities: [...deities] };
 };
+// Unions any speaker/book/prayer/deity values already used in `days`/`verses` into `labelsObj`.
+const withScannedLabels = (labelsObj, days, verses) => {
+  const found = scanLabelsFromData(days, verses);
+  return {
+    speakers: dedupOrdered(labelsObj.speakers, found.speakers),
+    books: dedupOrdered(labelsObj.books, found.books),
+    prayers: dedupOrdered(labelsObj.prayers, found.prayers),
+    deities: dedupOrdered(labelsObj.deities, found.deities),
+  };
+};
+const labelsEqual = (a, b) => ["speakers", "books", "prayers", "deities"].every((k) =>
+  (a[k] || []).length === (b[k] || []).length && (a[k] || []).every((v, i) => v === b[k][i]));
 const normalisePayload = (payload) => ({
   days: payload?.days && typeof payload.days === "object" ? payload.days : {},
   verses: Array.isArray(payload?.verses) ? payload.verses : [],
@@ -1762,9 +1774,13 @@ export default function App() {
         raw = await getStoredPayload("sadhana-v3");
         if (!raw?.value) raw = await getStoredPayload("sadhana-v2");
         const norm = normalisePayload(raw?.value ? JSON.parse(raw.value) : null);
+        const scannedLabels = withScannedLabels(norm.labels, norm.days, norm.verses);
         setData(norm.days);
         setVerses(norm.verses);
-        setLabels(norm.labels);
+        setLabels(scannedLabels);
+        if (!labelsEqual(scannedLabels, norm.labels)) {
+          await setStoredPayload("sadhana-v3", JSON.stringify({ days: norm.days, verses: norm.verses, labels: scannedLabels }));
+        }
       } catch (e) {}
       setLoaded(true);
     })();
@@ -1794,6 +1810,7 @@ export default function App() {
         const localPayload = { days: data, verses, labels };
         const cloudPayload = await fetchCloudState(user.id);
         const merged = cloudPayload ? mergePayloads(cloudPayload, localPayload) : normalisePayload(localPayload);
+        merged.labels = withScannedLabels(merged.labels, merged.days, merged.verses);
         if (cloudPayload || payloadHasContent(localPayload)) {
           setData(merged.days);
           setVerses(merged.verses);
@@ -1838,15 +1855,7 @@ export default function App() {
   const removeLabel = (kind, value) => {
     persist(data, verses, { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== value) });
   };
-  const rescanLabels = () => {
-    const found = scanLabelsFromData(data, verses);
-    persist(data, verses, {
-      speakers: dedupOrdered(labels.speakers, found.speakers),
-      books: dedupOrdered(labels.books, found.books),
-      prayers: dedupOrdered(labels.prayers, found.prayers),
-      deities: dedupOrdered(labels.deities, found.deities),
-    });
-  };
+  const rescanLabels = () => persist(data, verses, withScannedLabels(labels, data, verses));
   const LABEL_FIELD = {
     speakers: { arr: "hearing", field: "speaker" },
     books: { arr: "reading", field: "book" },
@@ -2129,14 +2138,7 @@ export default function App() {
       const parsed = normalisePayload(JSON.parse(text));
       if (!payloadHasContent(parsed)) { setBackupMsg("That file has no sadhana data in it."); return; }
       const next = mode === "replace" ? parsed : mergePayloads(parsed, { days: data, verses, labels });
-      const found = scanLabelsFromData(next.days, next.verses);
-      const nextLabels = {
-        speakers: dedupOrdered(next.labels.speakers, found.speakers),
-        books: dedupOrdered(next.labels.books, found.books),
-        prayers: dedupOrdered(next.labels.prayers, found.prayers),
-        deities: dedupOrdered(next.labels.deities, found.deities),
-      };
-      await persist(next.days, next.verses, nextLabels);
+      await persist(next.days, next.verses, withScannedLabels(next.labels, next.days, next.verses));
       setBackupMsg(mode === "replace" ? "Replaced current data with the backup file." : "Merged the backup file into your current data.");
     } catch (e) {
       setBackupMsg(e.message ? `Could not read that backup file: ${e.message}` : "Could not read that backup file.");
