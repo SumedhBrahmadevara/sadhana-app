@@ -1897,6 +1897,13 @@ export default function App() {
     const end = new Date(tsForTime(endTime)), start = new Date(end - m * 60000);
     update({ rounds: [...day.rounds, { start: start.toISOString(), end: end.toISOString() }] });
   };
+  const shiftJapaHistoryDate = (delta) => {
+    const base = new Date(`${historyDate || tk}T12:00:00`);
+    base.setDate(base.getDate() + delta);
+    const next = todayKey(base);
+    if (next > tk) return;
+    setHistoryDate(next);
+  };
 
   const [hForm, setHForm] = useState({ speaker: "", minutes: "", time: "" });
   const [rForm, setRForm] = useState({ book: BOOKS[0], section: "", minutes: "", pages: "", time: "" });
@@ -1905,6 +1912,7 @@ export default function App() {
   const [vForm, setVForm] = useState({ book: BOOKS[0], ref: "", text: "" });
   const [manageVerses, setManageVerses] = useState(false);
   const [historyDate, setHistoryDate] = useState("");
+  const [japaHistoryOpen, setJapaHistoryOpen] = useState(true);
   const [manualMin, setManualMin] = useState("");
   const [manualEnd, setManualEnd] = useState("");
   const [autochant, setAutochant] = useState(() => {
@@ -2640,8 +2648,44 @@ export default function App() {
             </section>
 
             <section style={cardS}>
-              <Toggle label="Autochant — auto-start the next round when one finishes" value={autochant} onChange={toggleAutochant} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+                onClick={() => setJapaHistoryOpen(!japaHistoryOpen)}>
+                <h2 style={{ ...h2S, margin: 0 }}>Round history</h2>
+                <span style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>{japaHistoryOpen ? "Hide ▲" : "Show ▼"}</span>
+              </div>
+              {japaHistoryOpen && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 14 }}>
+                    <button onClick={() => shiftJapaHistoryDate(-1)} style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1 }}>‹</button>
+                    <input type="date" value={historyDate || tk} max={tk} onChange={(e) => setHistoryDate(e.target.value)}
+                      style={{ ...inpS, textAlign: "center", fontWeight: 600, minWidth: 150 }} />
+                    <button onClick={() => shiftJapaHistoryDate(1)} disabled={(historyDate || tk) === tk}
+                      style={{ ...btnS, padding: "6px 12px", fontSize: 15, lineHeight: 1, opacity: (historyDate || tk) === tk ? 0.35 : 1, cursor: (historyDate || tk) === tk ? "default" : "pointer" }}>›</button>
+                  </div>
+                  {(() => {
+                    const viewDate = historyDate || tk;
+                    const viewRounds = data[viewDate]?.rounds || [];
+                    if (viewRounds.length === 0) return <Empty m={viewDate === tk ? "No rounds yet today." : "No rounds logged that day."} />;
+                    return viewRounds.map((r, i) => (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 }}>
+                        <span><b>#{i + 1}</b> <span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)}</span></span>
+                        <b style={{ color: C.tulsi }}>{mins(r)} min</b>
+                      </div>
+                    ));
+                  })()}
+                  <p style={{ fontSize: 11, color: C.faint, marginTop: 10, marginBottom: 0 }}>Read-only — to edit today, use the timer above.</p>
+                </div>
+              )}
             </section>
+
+            <button onClick={() => toggleAutochant(!autochant)} style={{
+              display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
+              fontSize: 12, fontWeight: 600, cursor: "pointer", width: "fit-content",
+              border: `1.5px solid ${autochant ? C.tulsi : C.line}`, background: autochant ? "#F0F4EC" : C.card, color: C.ink,
+            }} title="Auto-start the next round when one finishes">
+              <span style={{ width: 14, height: 14, borderRadius: "50%", background: autochant ? C.tulsi : C.line, color: "#fff", fontSize: 9, lineHeight: "14px", textAlign: "center", flexShrink: 0 }}>{autochant ? "✓" : ""}</span>
+              Autochant
+            </button>
 
             <section style={cardS}>
               <h2 style={h2S}>Today's rounds{avgRound && <span style={{ color: C.faint, fontWeight: 400, fontSize: 14 }}> — avg {avgRound} min</span>}</h2>
@@ -2683,25 +2727,6 @@ export default function App() {
                   </ResponsiveContainer>
                 </>
               )}
-            </section>
-
-            <section style={cardS}>
-              <h2 style={h2S}>Past rounds</h2>
-              <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>Read-only — pick a date to see that day's japa timings.</p>
-              <input type="date" value={historyDate} max={tk} onChange={(e) => setHistoryDate(e.target.value)} style={{ ...inpS, marginBottom: 14 }} />
-              {historyDate && historyDate !== tk && (
-                (data[historyDate]?.rounds || []).length === 0 ? (
-                  <Empty m="No rounds logged that day." />
-                ) : (
-                  data[historyDate].rounds.map((r, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 }}>
-                      <span><b>#{i + 1}</b> <span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)}</span></span>
-                      <b style={{ color: C.tulsi }}>{mins(r)} min</b>
-                    </div>
-                  ))
-                )
-              )}
-              {historyDate === tk && <div style={{ fontSize: 13, color: C.faint }}>That's today — see above to edit it.</div>}
             </section>
           </div>
         )}
@@ -2892,11 +2917,22 @@ export default function App() {
         {tab === "about" && (
           <div style={{ display: "grid", gap: 14 }}>
             <section style={cardS}>
-              <h2 style={h2S}>Sundar Chaitanya Das</h2>
-              <p style={{ fontSize: 13, color: C.faint, marginTop: -6 }}>formerly known as Sumedh Brahmadevara</p>
+              <h2 style={h2S}>The importance of sadhana</h2>
               <div style={{ display: "grid", gap: 12, fontSize: 14, lineHeight: 1.7 }}>
                 <p style={{ margin: 0 }}>
-                  Sundar Chaitanya Das, formerly known as Sumedh Brahmadevara, was born into the Kṛṣṇa conscious movement. From a young age, he was particularly intrigued by philosophy and Sanskrit ślokas: he would sit in lectures making notes and memorised ten chapters of the Bhagavad-gītā by the age of eight.
+                  Sādhana is the daily practice that turns philosophy into realisation. Chanting, hearing, reading, worship and remembrance are not separate boxes to tick. Each limb supports the others, and consistency across all of them, done a little every day, does more for the heart than intensity practised occasionally.
+                </p>
+                <p style={{ margin: 0 }}>
+                  This app exists because what gets measured gets attended to. Tracking sadhana honestly, including the days it falls short, builds the self-awareness needed to actually improve, rather than relying on vague impressions of "how it's going."
+                </p>
+              </div>
+            </section>
+
+            <section style={cardS}>
+              <h2 style={h2S}>Sundar Chaitanya Das</h2>
+              <div style={{ display: "grid", gap: 12, fontSize: 14, lineHeight: 1.7 }}>
+                <p style={{ margin: 0 }}>
+                  Sundar Chaitanya Das (also known as Sumedh Brahmadevara) was born into the Kṛṣṇa conscious movement. From a young age, he was particularly intrigued by philosophy and Sanskrit ślokas: he would sit in lectures making notes and memorised ten chapters of the Bhagavad-gītā by the age of eight.
                 </p>
                 <p style={{ margin: 0 }}>
                   He later began serving in kīrtanas and deepened his spiritual practice through increased scriptural study of the Bhagavad-gītā, Śrī Īśopaniṣad, Bhakti-rasāmṛta-sindhu, Tattva-sandarbha and various other Gauḍīya Vaiṣṇava texts. He completed his Bhakti-śāstrī qualification at the age of fifteen.
@@ -2910,18 +2946,6 @@ export default function App() {
                 <a href="https://www.youtube.com/@sundarchaitanyadas" target="_blank" rel="noopener noreferrer" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>YouTube →</a>
                 <a href="https://substack.com/@sundarchaitanyadas" target="_blank" rel="noopener noreferrer" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>Substack →</a>
                 <a href="mailto:sundarchaitanyadas@gmail.com" style={{ ...btnS, textDecoration: "none", display: "inline-block" }}>Email →</a>
-              </div>
-            </section>
-
-            <section style={cardS}>
-              <h2 style={h2S}>The importance of sadhana</h2>
-              <div style={{ display: "grid", gap: 12, fontSize: 14, lineHeight: 1.7 }}>
-                <p style={{ margin: 0 }}>
-                  Sādhana is the daily practice that turns philosophy into realisation. Chanting, hearing, reading, worship and remembrance are not separate boxes to tick — each limb supports the others, and consistency across all of them, done a little every day, does more for the heart than intensity practised occasionally.
-                </p>
-                <p style={{ margin: 0 }}>
-                  This app exists because what gets measured gets attended to. Tracking sadhana honestly — including the days it falls short — builds the self-awareness needed to actually improve, rather than relying on vague impressions of "how it's going."
-                </p>
               </div>
             </section>
           </div>
