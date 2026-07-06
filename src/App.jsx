@@ -2684,6 +2684,25 @@ export default function App() {
                 </>
               )}
             </section>
+
+            <section style={cardS}>
+              <h2 style={h2S}>Past rounds</h2>
+              <p style={{ fontSize: 12, color: C.faint, marginTop: 0 }}>Read-only — pick a date to see that day's japa timings.</p>
+              <input type="date" value={historyDate} max={tk} onChange={(e) => setHistoryDate(e.target.value)} style={{ ...inpS, marginBottom: 14 }} />
+              {historyDate && historyDate !== tk && (
+                (data[historyDate]?.rounds || []).length === 0 ? (
+                  <Empty m="No rounds logged that day." />
+                ) : (
+                  data[historyDate].rounds.map((r, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 }}>
+                      <span><b>#{i + 1}</b> <span style={{ color: C.faint }}>{fmtT(r.start)} → {fmtT(r.end)}</span></span>
+                      <b style={{ color: C.tulsi }}>{mins(r)} min</b>
+                    </div>
+                  ))
+                )
+              )}
+              {historyDate === tk && <div style={{ fontSize: 13, color: C.faint }}>That's today — see above to edit it.</div>}
+            </section>
           </div>
         )}
 
