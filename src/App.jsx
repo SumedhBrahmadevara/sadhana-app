@@ -1640,13 +1640,14 @@ const dedupOrdered = (...lists) => {
 // Once labels exist, even as empty arrays, we respect exactly what's there — including deletions.
 const normaliseLabels = (labels) => {
   if (!labels || typeof labels !== "object") {
-    return { speakers: [...DEFAULT_LABELS.speakers], books: [...DEFAULT_LABELS.books], prayers: [], deities: [] };
+    return { speakers: [...DEFAULT_LABELS.speakers], books: [...DEFAULT_LABELS.books], prayers: [], deities: [], updatedAt: 0 };
   }
   return {
     speakers: dedupOrdered(Array.isArray(labels.speakers) ? labels.speakers : []),
     books: dedupOrdered(Array.isArray(labels.books) ? labels.books : []),
     prayers: dedupOrdered(Array.isArray(labels.prayers) ? labels.prayers : []),
     deities: dedupOrdered(Array.isArray(labels.deities) ? labels.deities : []),
+    updatedAt: typeof labels.updatedAt === "number" ? labels.updatedAt : 0,
   };
 };
 // Finds distinct speaker/book/prayer/deity strings already used in logged days or verses
@@ -1674,6 +1675,9 @@ const withScannedLabels = (labelsObj, days, verses) => {
     books: dedupOrdered(labelsObj.books, found.books),
     prayers: dedupOrdered(labelsObj.prayers, found.prayers),
     deities: dedupOrdered(labelsObj.deities, found.deities),
+    // Backfilling implied labels from scanned data isn't an intentional user edit, so it
+    // shouldn't count as "newer" than a real add/remove/merge - carry the source timestamp through.
+    updatedAt: labelsObj.updatedAt || 0,
   };
 };
 const labelsEqual = (a, b) => ["speakers", "books", "prayers", "deities"].every((k) =>
@@ -1688,7 +1692,17 @@ const verseKey = (v, i) => (v?.ref || v?.text || v?.id || `verse-${i}`).trim().t
 const mergePayloads = (cloudPayload, localPayload) => {
   const cloud = normalisePayload(cloudPayload);
   const local = normalisePayload(localPayload);
-  const days = { ...cloud.days, ...local.days }; // local browser wins if the same date exists in both
+  // For a day present on both sides, prefer whichever copy was actually edited more recently
+  // instead of always taking the local one - otherwise an older local copy of a day can silently
+  // stomp a newer edit made from another device once it round-trips through the cloud merge.
+  // Days without an updatedAt (old data, before this existed) fall back to "local wins", matching
+  // the previous behaviour so nothing regresses for untouched history.
+  const days = {};
+  new Set([...Object.keys(cloud.days), ...Object.keys(local.days)]).forEach((k) => {
+    const c = cloud.days[k], l = local.days[k];
+    if (c && l) days[k] = (l.updatedAt || 0) >= (c.updatedAt || 0) ? l : c;
+    else days[k] = l || c;
+  });
   const verseMap = new Map();
   [...cloud.verses, ...local.verses].forEach((v, i) => {
     if (!v) return;
@@ -1700,12 +1714,12 @@ const mergePayloads = (cloudPayload, localPayload) => {
       recitationHistory: mergeUnique(prev.recitationHistory || [], v.recitationHistory || []),
     });
   });
-  const labels = {
-    speakers: dedupOrdered(cloud.labels.speakers, local.labels.speakers),
-    books: dedupOrdered(cloud.labels.books, local.labels.books),
-    prayers: dedupOrdered(cloud.labels.prayers, local.labels.prayers),
-    deities: dedupOrdered(cloud.labels.deities, local.labels.deities),
-  };
+  // Labels used to be unioned (purely additive), which meant a label removed via "merge into" on
+  // one device would keep reappearing forever from any other device whose local copy still had it,
+  // and each reload would re-upload that stale label right back to the cloud. Take whichever whole
+  // labels list was actually edited more recently instead; any label still genuinely in use gets
+  // re-surfaced afterwards by withScannedLabels() from the (now correctly merged) day data.
+  const labels = (local.labels.updatedAt || 0) >= (cloud.labels.updatedAt || 0) ? local.labels : cloud.labels;
   return { days, verses: [...verseMap.values()], labels };
 };
 const payloadHasContent = (payload) => {
@@ -1859,16 +1873,16 @@ export default function App() {
       setSave("saved"); setTimeout(() => setSave("idle"), 1200);
     } catch (e) { console.error(e); setSave("error"); setSync(user ? "error" : "local"); }
   };
-  const update = (patch) => persist({ ...data, [tk]: { ...day, ...patch } });
+  const update = (patch) => persist({ ...data, [tk]: { ...day, ...patch, updatedAt: Date.now() } });
   const addLabel = (kind, value) => {
     const v = (value || "").trim();
     if (!v || (labels[kind] || []).includes(v)) return;
-    persist(data, verses, { ...labels, [kind]: [...(labels[kind] || []), v] });
+    persist(data, verses, { ...labels, [kind]: [...(labels[kind] || []), v], updatedAt: Date.now() });
   };
   const removeLabel = (kind, value) => {
-    persist(data, verses, { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== value) });
+    persist(data, verses, { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== value), updatedAt: Date.now() });
   };
-  const rescanLabels = () => persist(data, verses, withScannedLabels(labels, data, verses));
+  const rescanLabels = () => persist(data, verses, { ...withScannedLabels(labels, data, verses), updatedAt: Date.now() });
   const LABEL_FIELD = {
     speakers: { arr: "hearing", field: "speaker" },
     books: { arr: "reading", field: "book" },
@@ -1878,12 +1892,15 @@ export default function App() {
   const mergeLabelInto = (kind, oldValue, newValue) => {
     if (!newValue || oldValue === newValue) return;
     const { arr, field } = LABEL_FIELD[kind];
-    const nextDays = Object.fromEntries(Object.entries(data).map(([k, d]) => [k, {
-      ...d,
-      [arr]: (d[arr] || []).map((item) => item[field] === oldValue ? { ...item, [field]: newValue } : item),
-    }]));
+    const nextDays = Object.fromEntries(Object.entries(data).map(([k, d]) => {
+      const items = d[arr] || [];
+      if (!items.some((item) => item[field] === oldValue)) return [k, d];
+      // Stamp only days actually rewritten, so the merge wins on other devices' next sync
+      // instead of getting silently reverted by their older local copy of the same day.
+      return [k, { ...d, [arr]: items.map((item) => item[field] === oldValue ? { ...item, [field]: newValue } : item), updatedAt: Date.now() }];
+    }));
     const nextVerses = kind === "books" ? verses.map((v) => v.book === oldValue ? { ...v, book: newValue } : v) : verses;
-    const nextLabels = { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== oldValue) };
+    const nextLabels = { ...labels, [kind]: (labels[kind] || []).filter((v) => v !== oldValue), updatedAt: Date.now() };
     persist(nextDays, nextVerses, nextLabels);
   };
   const setAwakeCount = (raw) => {
@@ -2524,7 +2541,7 @@ export default function App() {
                         const vs = verses.map((x, j) => j === i ? { ...x, lastRecited: recited ? null : tk, recitationHistory: [...hist] } : x);
                         const anyRevised = vs.some((x) => x.lastRevised === tk);
                         const anyRecited = vs.some((x) => x.lastRecited === tk);
-                        persist({ ...data, [tk]: { ...day, versesRevised: anyRevised, versesRecited: anyRecited } }, vs);
+                        persist({ ...data, [tk]: { ...day, versesRevised: anyRevised, versesRecited: anyRecited, updatedAt: Date.now() } }, vs);
                       }} style={{ ...btnS, padding: "5px 12px", fontSize: 12, background: recited ? "#F0F4EC" : "#fff", borderColor: recited ? C.tulsi : C.line, color: recited ? C.tulsi : C.ink }}>
                         {recited ? "Recited ✓" : "Recite"}
                       </button>
@@ -2534,7 +2551,7 @@ export default function App() {
                         const vs = verses.map((x, j) => j === i ? { ...x, lastRevised: revised ? null : tk, history: [...hist] } : x);
                         const anyRevised = vs.some((x) => x.lastRevised === tk);
                         const anyRecited = vs.some((x) => x.lastRecited === tk);
-                        persist({ ...data, [tk]: { ...day, versesRevised: anyRevised, versesRecited: anyRecited } }, vs);
+                        persist({ ...data, [tk]: { ...day, versesRevised: anyRevised, versesRecited: anyRecited, updatedAt: Date.now() } }, vs);
                       }} style={{ ...btnS, padding: "5px 12px", fontSize: 12, background: revised ? "#F0F4EC" : "#fff", borderColor: revised ? C.tulsi : C.line, color: revised ? C.tulsi : C.ink }}>
                         {revised ? "Revised ✓" : "Revise"}
                       </button>
